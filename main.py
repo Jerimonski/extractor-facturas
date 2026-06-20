@@ -6,6 +6,7 @@ from pydantic import BaseModel
 from google import genai
 from google.genai import types
 from dotenv import load_dotenv
+from sheets_service import test_connection
 
 load_dotenv()
 
@@ -20,6 +21,14 @@ client = genai.Client(
 class ErrorMessage(BaseModel):
     detail: str
 
+@app.get("/test-sheet")
+async def test_sheet():
+    test_connection()
+
+    return {
+        "status": "ok"
+    }
+    
 @app.post(
     "/procesar-factura",
     responses={
