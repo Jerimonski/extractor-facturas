@@ -50,7 +50,6 @@ DEVUELVE SOLO JSON VÁLIDO (sin texto, sin markdown, sin explicaciones).
 FORMATO OBLIGATORIO:
 [
   {
-    "CODIGO": "",
     "PRODUCTOS": "",
     "CANTIDAD": 0,
     "PRECIO_UNITARIO_SOLES": 0
