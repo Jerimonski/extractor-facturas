@@ -2,5 +2,9 @@ fastapi
 uvicorn
 google-genai
 python-multipart
+<<<<<<< HEAD
 gspread
 google-auth
+=======
+python-dotenv
+>>>>>>> 6f0f0f1acedb6610c47a57d2aadbedf5bca77a6f
