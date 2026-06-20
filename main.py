@@ -1,6 +1,6 @@
 import os
 import json
-from typing import List, Annotated
+from typing import List
 
 from fastapi import FastAPI, UploadFile, File, HTTPException
 from pydantic import BaseModel
@@ -11,11 +11,15 @@ from google.genai import types
 from sheets_service import (
     insertar_importacion,
     insertar_productos,
-    generar_siguiente_importacion_id
+    generar_siguiente_importacion_id,
+    insertar_test
 )
 
 app = FastAPI()
 
+# -------------------------
+# CATEGORÍAS PERMITIDAS
+# -------------------------
 ALLOWED_CATEGORIES = {
     "BEBIDAS Y LÍQUIDOS",
     "GALLETAS",
@@ -28,7 +32,7 @@ ALLOWED_CATEGORIES = {
 # -------------------------
 client = genai.Client(
     api_key=os.environ.get("GEMINI_API_KEY"),
-    http_options={'api_version': 'v1'}
+    http_options={"api_version": "v1"}
 )
 
 # -------------------------
@@ -39,13 +43,11 @@ class ErrorMessage(BaseModel):
 
 
 # -------------------------
-# TEST SHEET
+# TEST SHEET (debug)
 # -------------------------
 @app.get("/test-sheet")
 async def test_sheet():
-    from sheets_service import insertar_test
     insertar_test()
-
     return {"status": "ok"}
 
 
@@ -53,9 +55,9 @@ async def test_sheet():
 # PROMPT GEMINI
 # -------------------------
 GEMINI_PROMPT = """
-Eres un sistema de clasificación y extracción de facturas de importación.
+Eres un sistema de extracción y clasificación de facturas.
 
-Devuelve SOLO JSON válido, sin texto adicional ni markdown.
+Devuelve SOLO JSON válido sin texto adicional.
 
 FORMATO:
 [
@@ -67,20 +69,19 @@ FORMATO:
   }
 ]
 
-REGLAS ESTRICTAS:
-- CATEGORIA debe ser EXACTAMENTE una de estas opciones:
+REGLAS:
+- CATEGORIA debe ser una de:
   - BEBIDAS Y LÍQUIDOS
   - GALLETAS
   - HOGAR Y LIMPIEZA
   - PAPEL HIGIÉNICO
-
-- No puedes inventar ni modificar categorías
 - PRODUCTO en MAYÚSCULAS
 - CANTIDAD entero
 - PRECIO_SOLES decimal
-- No omitir productos
-- No agregar explicaciones
+- No inventar datos
 """
+
+
 # -------------------------
 # ENDPOINT PRINCIPAL
 # -------------------------
@@ -92,12 +93,12 @@ async def procesar_importacion(
         raise HTTPException(status_code=400, detail="Debes subir al menos un PDF")
 
     try:
-        # 1. generar ID IMPORTACIÓN
+        # 1. ID de importación
         importacion_id = generar_siguiente_importacion_id()
 
         all_products = []
 
-        # 2. procesar todos los PDFs
+        # 2. procesar PDFs
         for file in files:
 
             if file.content_type != "application/pdf":
@@ -124,30 +125,30 @@ async def procesar_importacion(
 
             try:
                 data = json.loads(cleaned)
+
+                if not isinstance(data, list):
+                    raise ValueError("Formato inválido")
+
+                # validación de categorías
                 for p in data:
                     if p.get("CATEGORIA") not in ALLOWED_CATEGORIES:
                         p["CATEGORIA"] = "HOGAR Y LIMPIEZA"
+
+                all_products.extend(data)
+
             except Exception:
                 raise HTTPException(
                     status_code=500,
                     detail=f"Gemini devolvió JSON inválido en {file.filename}"
                 )
 
-            if not isinstance(data, list):
-                raise HTTPException(
-                    status_code=500,
-                    detail="Formato incorrecto desde Gemini"
-                )
-
-            all_products.extend(data)
-
         # 3. métricas
         total_productos = len(all_products)
 
-        # 4. guardar en IMPORTACIONES (1 fila)
+        # 4. guardar importación (1 fila)
         insertar_importacion(
             importacion_id=importacion_id,
-            nombre=file.filename if len(files) == 1 else f"IMPORTACION {importacion_id}",
+            nombre=f"IMPORTACION {importacion_id}",
             cantidad_productos=total_productos
         )
 
@@ -157,7 +158,7 @@ async def procesar_importacion(
             productos=all_products
         )
 
-        # 6. respuesta final
+        # 6. respuesta
         return {
             "status": "success",
             "importacion_id": importacion_id,
