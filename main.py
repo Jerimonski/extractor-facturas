@@ -168,13 +168,3 @@ async def procesar_importacion(
 
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
-
-
-# -------------------------
-# RUN LOCAL
-# -------------------------
-if __name__ == "__main__":
-    import uvicorn
-
-    port = int(os.environ.get("PORT", 8080))
-    uvicorn.run("main:app", host="0.0.0.0", port=port, reload=True)
