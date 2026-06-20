@@ -48,7 +48,6 @@ async def procesar_factura(
         DEVUELVE SOLO UN ARREGLO JSON VÁLIDO (sin texto explicativo, sin markdown como ```json, sin introducciones).
 
         Mapea las columnas a estas llaves específicas:
-        - "CODIGO": Déjalo vacío "" si el documento no tiene una columna explícita de códigos.
         - "PRODUCTOS": Extrae el texto de la columna 'Descripción' en MAYÚSCULAS.
         - "CANTIDAD": Extrae el número de la columna 'Cantidad' (número entero).
         - "PRECIO_UNITARIO_SOLES": Extrae el valor numérico de la columna 'Valor Unitario' (número decimal).
