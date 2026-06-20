@@ -24,7 +24,31 @@ creds = Credentials.from_service_account_info(
 client = gspread.authorize(creds)
 
 SHEET_ID = "1YIH_rfIlLCmWPG4-Zn_4RlsNsEvxRWdc8_6LiIOhCPc"
-sheet = client.open_by_key(SHEET_ID)
+
+
+def insertar_test():
+    ws = get_ws("Importaciones")
+
+    ws.append_row([
+        "TEST",
+        "CONEXION OK",
+        "",
+        "",
+        "",
+        "",
+        datetime.now().strftime("%Y-%m-%d")
+    ])
+
+# -------------------------
+# SAFE SHEET ACCESS
+# -------------------------
+def get_sheet():
+    return client.open_by_key(SHEET_ID)
+
+
+def get_ws(name: str):
+    sheet = get_sheet()
+    return sheet.worksheet(name)
 
 
 # -------------------------
@@ -35,12 +59,7 @@ def get_year():
 
 
 def generar_siguiente_importacion_id():
-    """
-    Busca última importación y genera:
-    IMP-2026-001, IMP-2026-002...
-    """
-
-    ws = sheet.worksheet("Importaciones")
+    ws = get_ws("Importaciones")
     data = ws.get_all_values()
 
     year = get_year()
@@ -49,7 +68,7 @@ def generar_siguiente_importacion_id():
     last_number = 0
 
     for row in data[1:]:
-        if len(row) == 0:
+        if not row:
             continue
 
         imp_id = row[0]
@@ -62,34 +81,33 @@ def generar_siguiente_importacion_id():
                 pass
 
     next_number = last_number + 1
-
     return f"{prefix}{str(next_number).zfill(3)}"
 
 
 # -------------------------
-# IMPORTACIONES SHEET
+# IMPORTACIONES
 # -------------------------
 def insertar_importacion(importacion_id, nombre, cantidad_productos):
-    ws = sheet.worksheet("Importaciones")
+    ws = get_ws("Importaciones")
 
     fecha = datetime.now().strftime("%Y-%m-%d")
 
     ws.append_row([
         importacion_id,
         nombre,
-        "",  # TipoCambio (si luego lo usas)
-        "",  # GastosImportacion
+        "",
+        "",
         cantidad_productos,
-        "",  # GastoPorUnidad
+        "",
         fecha
     ])
 
 
 # -------------------------
-# PRODUCTOS SHEET
+# PRODUCTOS
 # -------------------------
 def insertar_productos(importacion_id, productos):
-    ws = sheet.worksheet("ProductosImportados")
+    ws = get_ws("ProductosImportados")
 
     for p in productos:
         ws.append_row([
@@ -106,7 +124,7 @@ def insertar_productos(importacion_id, productos):
 # TEST
 # -------------------------
 def test_connection():
-    ws = sheet.worksheet("Importaciones")
+    ws = get_ws("Importaciones")
 
     ws.append_row([
         "TEST",
