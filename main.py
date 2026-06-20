@@ -83,7 +83,7 @@ async def test_sheet():
     }
 )
 async def procesar_importacion(
-    files: list[UploadFile] = File(..., description="Selecciona uno o varios archivos PDF de facturas")
+    files: list[UploadFile] = File(description="Selecciona uno o varios archivos PDF de facturas")
 ):
     if not files or len(files) == 0:
         raise HTTPException(status_code=400, detail="Debes cargar al menos un archivo PDF válido.")
