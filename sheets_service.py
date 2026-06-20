@@ -12,33 +12,34 @@ class GoogleSheetsService:
         self._client = None
 
     def _get_client(self):
-        """Lazy initialization para asegurar estabilidad en el arranque de FastAPI"""
         if self._client is None:
-            try:
-                credentials_dict = json.loads(os.environ["GOOGLE_CREDENTIALS_JSON"])
-                creds = Credentials.from_service_account_info(credentials_dict, scopes=SCOPES)
-                self._client = gspread.authorize(creds)
-            except Exception as e:
-                raise RuntimeError(f"Error crítico al inicializar credenciales de Google Sheets: {str(e)}")
+            credentials_dict = json.loads(os.environ["GOOGLE_CREDENTIALS_JSON"])
+            creds = Credentials.from_service_account_info(credentials_dict, scopes=SCOPES)
+            self._client = gspread.authorize(creds)
         return self._client
 
     def get_ws(self, worksheet_name: str):
-        try:
-            sheet = self._get_client().open_by_key(SHEET_ID)
-            return sheet.worksheet(worksheet_name)
-        except Exception as e:
-            raise RuntimeError(f"No se pudo acceder a la pestaña '{worksheet_name}': {str(e)}")
+        sheet = self._get_client().open_by_key(SHEET_ID)
+        return sheet.worksheet(worksheet_name)
+
+    def obtener_ultimo_importacion_id(self) -> str:
+        """Obtiene el ID más reciente directamente de la última fila de la tabla"""
+        ws = self.get_ws("Importaciones")
+        data = ws.get_all_values()
+        if len(data) <= 1:
+            # Fallback si la hoja está completamente vacía, genera el primero
+            return self.generar_siguiente_importacion_id()
+        return data[-1][0]  # Toma el ID de la última fila
 
     def generar_siguiente_importacion_id(self) -> str:
         ws = self.get_ws("Importaciones")
         data = ws.get_all_values()
-        
         year = datetime.now().year
         prefix = f"IMP-{year}-"
         last_number = 0
 
         for row in data[1:]:
-            if not row or len(row) == 0:
+            if not row:
                 continue
             imp_id = row[0]
             if imp_id.startswith(prefix):
@@ -48,31 +49,36 @@ class GoogleSheetsService:
                 except ValueError:
                     pass
 
-        next_number = last_number + 1
-        return f"{prefix}{str(next_number).zfill(3)}"
+        return f"{prefix}{str(last_number + 1).zfill(3)}"
 
     def insertar_importacion(self, importacion_id: str, nombre: str, cantidad_productos: int):
         ws = self.get_ws("Importaciones")
         fecha = datetime.now().strftime("%Y-%m-%d")
+        ws.append_row([importacion_id, nombre, "", "", cantidad_productos, "", fecha])
+
+    def actualizar_cantidad_maestra(self, importacion_id: str, cantidad_adicional: int):
+        """Busca la fila correspondiente en 'Importaciones' y suma la nueva cantidad extraída"""
+        ws = self.get_ws("Importaciones")
+        data = ws.get_all_values()
         
-        ws.append_row([
-            importacion_id,
-            nombre,
-            "",  # TipoCambio
-            "",  # GastosImportacion
-            cantidad_productos,
-            "",  # GastoPorUnidad
-            fecha
-        ])
+        for i, row in enumerate(data):
+            if row and row[0] == importacion_id:
+                # La columna CantidadProductos está en la posición índice 4 (quinta columna)
+                try:
+                    cantidad_actual = int(row[4]) if row[4] else 0
+                except ValueError:
+                    cantidad_actual = 0
+                
+                nueva_cantidad = cantidad_actual + cantidad_adicional
+                # gspread usa índices base 1, por ende la fila es i+1 y la columna es 5
+                ws.update_cell(i + 1, 5, nueva_cantidad)
+                break
 
     def insertar_productos_batch(self, importacion_id: str, productos: list):
-        """Inserta N filas en una sola llamada de red (Batch Insert)"""
         if not productos:
             return
-            
         ws = self.get_ws("ProductosImportados")
         filas_a_insertar = []
-
         for p in productos:
             filas_a_insertar.append([
                 importacion_id,
@@ -80,18 +86,8 @@ class GoogleSheetsService:
                 p.get("PRODUCTO", ""),
                 p.get("CANTIDAD", 0),
                 p.get("PRECIO_SOLES", 0),
-                ""  # PrecioVenta
+                ""
             ])
-            
-        # Inserción masiva ultra rápida
         ws.append_rows(filas_a_insertar)
 
-    def insertar_test(self):
-        ws = self.get_ws("Importaciones")
-        ws.append_row([
-            "TEST", "CONEXION OK", "", "", "", "", 
-            datetime.now().strftime("%Y-%m-%d")
-        ])
-
-# Instancia única reutilizable
 sheets_backend = GoogleSheetsService()

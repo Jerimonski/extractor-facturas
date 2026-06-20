@@ -1,7 +1,6 @@
 import os
 import json
-from typing import List
-from fastapi import FastAPI, UploadFile, File, HTTPException, status
+from fastapi import FastAPI, UploadFile, File, Form, HTTPException
 from pydantic import BaseModel, Field, ValidationError
 from google import genai
 from google.genai import types
@@ -13,141 +12,100 @@ load_dotenv()
 
 app = FastAPI(
     title="ERP Ligero - Extractor de Importaciones",
-    description="Pipeline de automatización para procesamiento de facturas en PDF usando IA"
+    description="Pipeline optimizado para procesar facturas individuales con opción de consolidación."
 )
 
 ALLOWED_CATEGORIES = {"BEBIDAS Y LÍQUIDOS", "GALLETAS", "HOGAR Y LIMPIEZA", "PAPEL HIGIÉNICO"}
 
-# Inicialización segura del cliente Gemini (API v1 estable)
 client = genai.Client(
     api_key=os.environ.get("GEMINI_API_KEY"),
     http_options={"api_version": "v1"}
 )
 
-# -------------------------
-# MODELOS DE VALIDACIÓN (PYDANTIC)
-# -------------------------
 class ProductoExtraido(BaseModel):
-    CATEGORIA: str = Field(..., description="Categoría asignada al producto")
-    PRODUCTO: str = Field(..., description="Nombre o descripción del artículo en mayúsculas")
-    CANTIDAD: int = Field(..., gt=0, description="Cantidad entera mayor a cero")
-    PRECIO_SOLES: float = Field(..., ge=0.0, description="Precio unitario en soles")
+    CATEGORIA: str
+    PRODUCTO: str
+    CANTIDAD: int = Field(..., gt=0)
+    PRECIO_SOLES: float = Field(..., ge=0.0)
 
 class ErrorMessage(BaseModel):
     detail: str
 
-# -------------------------
-# PROMPT REFORZADO
-# -------------------------
 GEMINI_PROMPT = """
-Eres un sistema experto en extracción y clasificación de facturas comerciales.
-Analiza el documento PDF adjunto y estructura su información.
+Eres un extractor de facturas comerciales. Analiza el PDF y devuelve un arreglo JSON válido.
+NO incluyas bloques markdown ni texto explicativo.
 
-Devuelve ESTRICTAMENTE un arreglo JSON válido, sin formato markdown, sin envolverlo en bloques ```json, y sin comentarios explicativos.
-
-FORMATO DE SALIDA COMPULSORIO:
+FORMATO OBLIGATORIO:
 [
   {
     "CATEGORIA": "GALLETAS",
-    "PRODUCTO": "NOMBRE EN MAYUSCULAS DEL PRODUCTO",
+    "PRODUCTO": "DESCRIPCION EN MAYUSCULAS",
     "CANTIDAD": 10,
     "PRECIO_SOLES": 15.50
   }
 ]
 
-REGLAS DE NEGOCIO:
-1. Clasifica cada artículo mapeándolo única y exclusivamente a una de estas categorías permitidas:
-   - BEBIDAS Y LÍQUIDOS
-   - GALLETAS
-   - HOGAR Y LIMPIEZA
-   - PAPEL HIGIÉNICO
-2. El campo 'PRODUCTO' debe estar completamente en MAYÚSCULAS.
-3. 'CANTIDAD' debe extraerse como un número entero.
-4. 'PRECIO_SOLES' mapea el valor monetario unitario como punto decimal.
+CATEGORÍAS PERMITIDAS: BEBIDAS Y LÍQUIDOS, GALLETAS, HOGAR Y LIMPIEZA, PAPEL HIGIÉNICO.
 """
 
-@app.get("/test-sheet", summary="Validar conexión con Sheets")
-async def test_sheet():
-    try:
-        sheets_backend.insertar_test()
-        return {"status": "ok", "message": "Fila de prueba insertada exitosamente"}
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
-
 @app.post(
-    "/procesar-importacion",
-    summary="Subir múltiples facturas en PDF y consolidar importación",
-    responses={
-        400: {"model": ErrorMessage, "description": "Formato de archivo o entrada no válida"},
-        500: {"model": ErrorMessage, "description": "Error crítico en el backend o en la API de IA"}
-    }
+    "/procesar-factura",
+    summary="Procesar una factura en PDF",
+    responses={400: {"model": ErrorMessage}, 500: {"model": ErrorMessage}}
 )
-async def procesar_importacion(
-    files: list[UploadFile] = File(description="Selecciona uno o varios archivos PDF de facturas")
+async def procesar_factura(
+    file: UploadFile = File(..., description="Selecciona el archivo PDF de la factura"),
+    misma_importacion: bool = Form(False, description="Marca esta casilla si el PDF pertenece a la misma importación anterior")
 ):
-    if not files or len(files) == 0:
-        raise HTTPException(status_code=400, detail="Debes cargar al menos un archivo PDF válido.")
+    if not file.filename.lower().endswith('.pdf'):
+        raise HTTPException(status_code=400, detail="El archivo debe ser un formato PDF válido.")
 
     try:
-        # 1. Generación resiliente de ID de importación
-        importacion_id = sheets_backend.generar_siguiente_importacion_id()
+        # 1. Decidir u obtener el ID de importación correspondiente
+        if misma_importacion:
+            importacion_id = sheets_backend.obtener_ultimo_importacion_id()
+            es_nueva_fila_maestra = False
+        else:
+            importacion_id = sheets_backend.generar_siguiente_importacion_id()
+            es_nueva_fila_maestra = True
+
+        # 2. Leer archivo y consultar a Gemini
+        pdf_bytes = await file.read()
+        pdf_part = types.Part.from_bytes(data=pdf_bytes, mime_type="application/pdf")
+
+        response = client.models.generate_content(
+            model="gemini-2.5-flash",
+            contents=[pdf_part, GEMINI_PROMPT]
+        )
+
+        raw_output = response.text.strip()
+        cleaned = raw_output.replace("```json", "").replace("```", "").strip()
+
+        data_json = json.loads(cleaned)
         all_products_validated = []
 
-        # 2. Procesamiento iterativo de los documentos
-        for file in files:
-            if not file.filename.lower().endswith('.pdf') and file.content_type != "application/pdf":
-                raise HTTPException(
-                    status_code=400, 
-                    detail=f"El archivo '{file.filename}' no corresponde a un formato PDF permitido."
-                )
-
-            pdf_bytes = await file.read()
-            pdf_part = types.Part.from_bytes(data=pdf_bytes, mime_type="application/pdf")
-
-            # Invocación al modelo predictivo
-            response = client.models.generate_content(
-                model="gemini-2.5-flash",
-                contents=[pdf_part, GEMINI_PROMPT]
-            )
-
-            raw_output = response.text.strip()
-            cleaned = raw_output.replace("```json", "").replace("```", "").strip()
-
-            try:
-                data_json = json.loads(cleaned)
-                if not isinstance(data_json, list):
-                    raise ValueError("La respuesta raíz de Gemini no se estructuró como una lista.")
-                
-                # Validación Estricta por Esquema mediante Pydantic
-                for item in data_json:
-                    # Corrección en caliente de categorías inválidas antes de validar
-                    if item.get("CATEGORIA") not in ALLOWED_CATEGORIES:
-                        item["CATEGORIA"] = "HOGAR Y LIMPIEZA"
-                    
-                    # Traspaso al validador nativo
-                    producto_validado = ProductoExtraido(**item)
-                    all_products_validated.append(producto_validado.model_dump())
-
-            except (json.JSONDecodeError, ValidationError, ValueError) as err:
-                print(f"--- LOG ERROR PROCESAMIENTO EN {file.filename} ---")
-                print(f"Raw recibido: {raw_output}")
-                print(f"Detalle del error: {str(err)}")
-                raise HTTPException(
-                    status_code=500,
-                    detail=f"Error al analizar o estructurar los datos del archivo '{file.filename}'."
-                )
+        for item in data_json:
+            if item.get("CATEGORIA") not in ALLOWED_CATEGORIES:
+                item["CATEGORIA"] = "HOGAR Y LIMPIEZA"
+            
+            producto_validado = ProductoExtraido(**item)
+            all_products_validated.append(producto_validado.model_dump())
 
         total_productos = len(all_products_validated)
 
-        # 3. Persistencia Transaccional en Google Sheets
-        # Guardamos el registro maestro (1 fila)
-        sheets_backend.insertar_importacion(
-            importacion_id=importacion_id,
-            nombre=f"IMPORTACION {importacion_id}",
-            cantidad_productos=total_productos
-        )
+        # 3. Guardar en Google Sheets de forma estructurada
+        if es_nueva_fila_maestra:
+            # Crea el registro maestro principal si es una importación nueva
+            sheets_backend.insertar_importacion(
+                importacion_id=importacion_id,
+                nombre=f"IMPORTACION {importacion_id}",
+                cantidad_productos=total_productos
+            )
+        else:
+            # Si se consolida, actualiza el contador acumulado de la fila maestra existente
+            sheets_backend.actualizar_cantidad_maestra(importacion_id, total_productos)
 
-        # Guardamos los registros detalle (N filas consolidadas de una sola vez)
+        # Volcado de productos asociados al ID correspondiente (Batch rápido)
         sheets_backend.insertar_productos_batch(
             importacion_id=importacion_id,
             productos=all_products_validated
@@ -156,11 +114,9 @@ async def procesar_importacion(
         return {
             "status": "success",
             "importacion_id": importacion_id,
-            "facturas_procesadas": len(files),
-            "productos_totales": total_productos
+            "consolidado": misma_importacion,
+            "productos_añadidos": total_productos
         }
 
-    except HTTPException as http_ex:
-        raise http_ex
     except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Falla catastrófica interna del servidor: {str(e)}")
+        raise HTTPException(status_code=500, detail=str(e))
