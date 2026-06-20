@@ -1,123 +1,179 @@
 import os
 import json
-from typing import Annotated
+from typing import List, Annotated
+
 from fastapi import FastAPI, UploadFile, File, HTTPException
 from pydantic import BaseModel
+
 from google import genai
 from google.genai import types
-from dotenv import load_dotenv
-from sheets_service import test_connection
 
-load_dotenv()
+from sheets_service import (
+    insertar_importacion,
+    insertar_productos,
+    generar_siguiente_importacion_id
+)
 
 app = FastAPI()
 
-# Cliente Gemini con configuración explícita de API de producción v1 para evitar 502/404s
+ALLOWED_CATEGORIES = {
+    "BEBIDAS Y LÍQUIDOS",
+    "GALLETAS",
+    "HOGAR Y LIMPIEZA",
+    "PAPEL HIGIÉNICO"
+}
+
+# -------------------------
+# GEMINI CLIENT
+# -------------------------
 client = genai.Client(
     api_key=os.environ.get("GEMINI_API_KEY"),
     http_options={'api_version': 'v1'}
 )
 
+# -------------------------
+# MODELO ERROR
+# -------------------------
 class ErrorMessage(BaseModel):
     detail: str
 
+
+# -------------------------
+# TEST SHEET
+# -------------------------
 @app.get("/test-sheet")
 async def test_sheet():
-    test_connection()
+    from sheets_service import insertar_test
+    insertar_test()
 
-    return {
-        "status": "ok"
-    }
-    
-@app.post(
-    "/procesar-factura",
-    responses={
-        400: {"model": ErrorMessage, "description": "El archivo subido no es un PDF válido"},
-        500: {"model": ErrorMessage, "description": "Error interno del servidor o falla en la API de Gemini"}
-    }
-)
-async def procesar_factura(
-    file: Annotated[UploadFile, File(description="Factura en PDF")]
+    return {"status": "ok"}
+
+
+# -------------------------
+# PROMPT GEMINI
+# -------------------------
+GEMINI_PROMPT = """
+Eres un sistema de clasificación y extracción de facturas de importación.
+
+Devuelve SOLO JSON válido, sin texto adicional ni markdown.
+
+FORMATO:
+[
+  {
+    "CATEGORIA": "",
+    "PRODUCTO": "",
+    "CANTIDAD": 0,
+    "PRECIO_SOLES": 0
+  }
+]
+
+REGLAS ESTRICTAS:
+- CATEGORIA debe ser EXACTAMENTE una de estas opciones:
+  - BEBIDAS Y LÍQUIDOS
+  - GALLETAS
+  - HOGAR Y LIMPIEZA
+  - PAPEL HIGIÉNICO
+
+- No puedes inventar ni modificar categorías
+- PRODUCTO en MAYÚSCULAS
+- CANTIDAD entero
+- PRECIO_SOLES decimal
+- No omitir productos
+- No agregar explicaciones
+"""
+# -------------------------
+# ENDPOINT PRINCIPAL
+# -------------------------
+@app.post("/procesar-importacion")
+async def procesar_importacion(
+    files: List[UploadFile] = File(...)
 ):
-    if file.content_type != "application/pdf":
-        raise HTTPException(status_code=400, detail="El archivo debe ser PDF")
+    if not files:
+        raise HTTPException(status_code=400, detail="Debes subir al menos un PDF")
 
     try:
-        pdf_bytes = await file.read()
+        # 1. generar ID IMPORTACIÓN
+        importacion_id = generar_siguiente_importacion_id()
 
-        pdf_part = types.Part.from_bytes(
-            data=pdf_bytes,
-            mime_type="application/pdf"
-        )
+        all_products = []
 
-        # Prompt reforzado con las columnas reales de tu factura
-        prompt = """
-        Eres un extractor de datos de facturas experto. Mapea la información basándote exclusivamente en el documento.
-        
-        DEVUELVE SOLO UN ARREGLO JSON VÁLIDO (sin texto explicativo, sin markdown como ```json, sin introducciones).
+        # 2. procesar todos los PDFs
+        for file in files:
 
-        Mapea las columnas a estas llaves específicas:
-        - "PRODUCTOS": Extrae el texto de la columna 'Descripción' en MAYÚSCULAS.
-        - "CANTIDAD": Extrae el número de la columna 'Cantidad' (número entero).
-        - "PRECIO_UNITARIO_SOLES": Extrae el valor numérico de la columna 'Valor Unitario' (número decimal).
+            if file.content_type != "application/pdf":
+                raise HTTPException(
+                    status_code=400,
+                    detail=f"Archivo inválido: {file.filename}"
+                )
 
-        FORMATO OBLIGATORIO DE RESPUESTA:
-        [
-          {
-            "PRODUCTOS": "GASEOSA COCA COLA 12 UNID. X 600 ML.",
-            "CANTIDAD": 200,
-            "PRECIO_UNITARIO_SOLES": 24.60
-          }
-        ]
-        """
+            pdf_bytes = await file.read()
 
-        response = client.models.generate_content(
-            model="gemini-2.5-flash",  
-            contents=[pdf_part, prompt]
-        )
-
-        raw_output = response.text.strip()
-
-        print("===== GEMINI RAW OUTPUT =====")
-        print(raw_output)
-        print("=============================")
-
-        # Limpieza defensiva de tags Markdown
-        cleaned = (
-            raw_output
-            .replace("```json", "")
-            .replace("```", "")
-            .strip()
-        )
-
-        # Conversión y validación real a JSON
-        try:
-            data = json.loads(cleaned)
-        except Exception as e:
-            raise HTTPException(
-                status_code=500,
-                detail=f"Gemini no devolvió JSON válido: {str(e)}"
+            pdf_part = types.Part.from_bytes(
+                data=pdf_bytes,
+                mime_type="application/pdf"
             )
 
-        if not isinstance(data, list):
-            raise HTTPException(
-                status_code=500,
-                detail="El JSON obtenido no es una lista de productos estructurada"
+            response = client.models.generate_content(
+                model="gemini-2.5-flash",
+                contents=[pdf_part, GEMINI_PROMPT]
             )
 
-        # Nota de compatibilidad: Mantenemos el retorno de 'data' serializado como string 
-        # para que tu Google Apps Script actual (JSON.parse) no falle.
+            raw = response.text.strip()
+
+            cleaned = raw.replace("```json", "").replace("```", "").strip()
+
+            try:
+                data = json.loads(cleaned)
+                for p in data:
+                    if p.get("CATEGORIA") not in ALLOWED_CATEGORIES:
+                        p["CATEGORIA"] = "HOGAR Y LIMPIEZA"
+            except Exception:
+                raise HTTPException(
+                    status_code=500,
+                    detail=f"Gemini devolvió JSON inválido en {file.filename}"
+                )
+
+            if not isinstance(data, list):
+                raise HTTPException(
+                    status_code=500,
+                    detail="Formato incorrecto desde Gemini"
+                )
+
+            all_products.extend(data)
+
+        # 3. métricas
+        total_productos = len(all_products)
+
+        # 4. guardar en IMPORTACIONES (1 fila)
+        insertar_importacion(
+            importacion_id=importacion_id,
+            nombre=file.filename if len(files) == 1 else f"IMPORTACION {importacion_id}",
+            cantidad_productos=total_productos
+        )
+
+        # 5. guardar productos (N filas)
+        insertar_productos(
+            importacion_id=importacion_id,
+            productos=all_products
+        )
+
+        # 6. respuesta final
         return {
             "status": "success",
-            "count": len(data),
-            "data": json.dumps(data) 
+            "importacion_id": importacion_id,
+            "facturas_procesadas": len(files),
+            "productos_totales": total_productos
         }
 
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
-# Esto asegura que si corres el archivo localmente con 'python main.py', lea el puerto correcto de las variables
+
+# -------------------------
+# RUN LOCAL
+# -------------------------
 if __name__ == "__main__":
     import uvicorn
+
     port = int(os.environ.get("PORT", 8080))
     uvicorn.run("main:app", host="0.0.0.0", port=port, reload=True)
